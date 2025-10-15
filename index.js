@@ -71,6 +71,7 @@ app.post('/api/login', async (req, res) => {
 
 // PASTE THIS NEW ENDPOINT HERE
 app.get('/api/students/:studentId', async (req, res) => {
+  console.log(`--- Request received for student ID: ${req.params.studentId} ---`);
   const { studentId } = req.params;
 
   try {
