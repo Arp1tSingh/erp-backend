@@ -69,24 +69,56 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
-// PASTE THIS NEW ENDPOINT HERE
+
 app.get('/api/students/:studentId', async (req, res) => {
+  // Log receipt of request (good for debugging)
   console.log(`--- Request received for student ID: ${req.params.studentId} ---`);
   const { studentId } = req.params;
 
   try {
-    const query = 'SELECT student_id, first_name, last_name, email, admission_date, department, current_year, status FROM "student" WHERE student_id = $1';
-    const result = await pool.query(query, [studentId]);
+    // === Step 1: Get Student Profile Data ===
+    const studentQuery = 'SELECT student_id, first_name, last_name, email, admission_date, department, current_year, status FROM "student" WHERE student_id = $1';
+    const studentResult = await pool.query(studentQuery, [studentId]);
 
-    if (result.rows.length === 0) {
+    // Check if student exists
+    if (studentResult.rows.length === 0) {
+      console.log(`Student not found for ID: ${studentId}`); // Add log for debugging
       return res.status(404).json({ message: 'Student not found.' });
     }
-    
-    res.status(200).json(result.rows[0]);
+    // Store the student data temporarily
+    const studentData = studentResult.rows[0];
+
+    // === Step 2: Calculate SGPA for the most recent semester ===
+    const sgpaQuery = `
+      WITH LatestSemester AS (
+          SELECT MAX(semester_id) as latest_sem_id
+          FROM "enrollment"
+          WHERE student_id = $1
+      )
+      SELECT
+        -- Calculate SUM(Credit * Point) / SUM(Credit)
+        COALESCE(SUM(c.credit_hours * g.gpa_point) / NULLIF(SUM(c.credit_hours), 0), 0) AS sgpa
+      FROM "enrollment" e
+      JOIN "grade" g ON e.enrollment_id = g.enrollment_id
+      JOIN "course" c ON e.course_id = c.course_id
+      JOIN LatestSemester ls ON e.semester_id = ls.latest_sem_id -- Join with the subquery
+      WHERE e.student_id = $1;
+    `;
+    const sgpaResult = await pool.query(sgpaQuery, [studentId]);
+
+    // Extract SGPA, format to 2 decimal places, default to '0.00' if null/undefined
+    const sgpa = parseFloat(sgpaResult.rows[0]?.sgpa || 0).toFixed(2);
+    console.log(`Calculated SGPA for ${studentId}: ${sgpa}`); // Add log for debugging
+
+    // === Step 3: Send ONE combined response ===
+    // Send both the student profile data and the calculated SGPA
+    res.status(200).json({ student: studentData, sgpa: sgpa });
 
   } catch (error) {
-    console.error('Database error fetching student:', error);
-    res.status(500).json({ message: 'An internal server error occurred.' });
+    // Log the detailed error on the server
+    console.error(`Database error fetching data for student ${studentId}:`, error);
+    // Send a generic error message to the client
+    res.status(500).json({ message: 'An internal server error occurred while fetching dashboard data.' });
   }
 });
 
