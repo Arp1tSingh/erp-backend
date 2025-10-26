@@ -1,4 +1,3 @@
-// backend/index.js
 require('dotenv').config();
 console.log('Attempting to connect with DATABASE_URL:', process.env.DATABASE_URL);
 
@@ -61,7 +60,8 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
-// --- STUDENT DATA + DASHBOARD STATS ENDPOINT ---
+// --- STUDENT DASHBOARD DATA ENDPOINT ---
+// --- CORRECTED STUDENT DATA ENDPOINT ---
 app.get('/api/students/:studentId', async (req, res) => {
   const { studentId } = req.params;
   console.log(`--- Request received for student ID: ${studentId} ---`);
@@ -72,60 +72,69 @@ app.get('/api/students/:studentId', async (req, res) => {
     const studentResult = await pool.query(studentQuery, [studentId]);
 
     if (studentResult.rows.length === 0) {
-        console.log(`Student not found for ID: ${studentId}`);
-        return res.status(404).json({ message: 'Student not found.' });
+      console.log(`Student not found for ID: ${studentId}`);
+      return res.status(404).json({ message: 'Student not found.' });
     }
     const studentData = studentResult.rows[0];
 
-    // === Step 2: Calculate SGPA ===
-    const sgpaQuery = `
-      WITH LatestSemester AS (
-          SELECT MAX(semester_id) as latest_sem_id
-          FROM "enrollment"
-          WHERE student_id = $1
-      )
-      SELECT
-        COALESCE(SUM(c.credit_hours * g.gpa_point) / NULLIF(SUM(c.credit_hours), 0), 0) AS sgpa
-      FROM "enrollment" e
-      JOIN "grade" g ON e.enrollment_id = g.enrollment_id
-      JOIN "course" c ON e.course_id = c.course_id
-      JOIN LatestSemester ls ON e.semester_id = ls.latest_sem_id
-      WHERE e.student_id = $1;
-    `;
-    const sgpaResult = await pool.query(sgpaQuery, [studentId]);
-    const sgpa = parseFloat(sgpaResult.rows[0]?.sgpa || 0).toFixed(2);
-    console.log(`Calculated SGPA for ${studentId}: ${sgpa}`);
+    // === Step 1.5: Find the student's latest semester ID ONCE ===
+    const latestSemesterQuery = `SELECT MAX(semester_id) as latest_sem_id FROM "enrollment" WHERE student_id = $1;`;
+    const semesterResult = await pool.query(latestSemesterQuery, [studentId]);
+    const latestSemesterId = semesterResult.rows[0]?.latest_sem_id; // Store it here
 
-    // === Step 3: Calculate Attendance Rate ===
-    const attendanceQuery = `
-      SELECT
-        COUNT(CASE WHEN a.status IN ('Present', 'Late') THEN 1 ELSE NULL END) AS attended_classes,
-        COUNT(a.attendance_id) AS total_classes
-      FROM "attendance" a
-      JOIN "enrollment" e ON a.enrollment_id = e.enrollment_id
-      WHERE e.student_id = $1;
-    `;
-    const attendanceResult = await pool.query(attendanceQuery, [studentId]);
-    const attendedClasses = parseInt(attendanceResult.rows[0]?.attended_classes || 0);
-    const totalClasses = parseInt(attendanceResult.rows[0]?.total_classes || 0);
-    const attendanceRate = totalClasses === 0 ? 0 : ((attendedClasses / totalClasses) * 100);
-    const formattedAttendanceRate = attendanceRate.toFixed(1);
-    console.log(`Calculated Attendance Rate for ${studentId}: ${formattedAttendanceRate}%`);
+    // --- Initialize variables with default values ---
+    let sgpa = '0.00';
+    let formattedAttendanceRate = '0.0';
+    let enrolledCoursesCount = 0;
 
-    // === Step 4: Count Enrolled Courses for Current Semester ===
-    const enrolledCoursesQuery = `
-      SELECT COUNT(enrollment_id) AS course_count
-      FROM "enrollment"
-      WHERE student_id = $1
-      AND semester_id = (
-        SELECT MAX(semester_id)
+    // Only proceed with calculations if the student has enrollments
+    if (latestSemesterId) {
+      console.log(`Latest semester ID for ${studentId} is ${latestSemesterId}`);
+
+      // === Step 2: Calculate SGPA (Use the latestSemesterId found above) ===
+      const sgpaQuery = `
+        SELECT COALESCE(SUM(c.credit_hours * g.gpa_point) / NULLIF(SUM(c.credit_hours), 0), 0) AS sgpa
+        FROM "enrollment" e
+        JOIN "grade" g ON e.enrollment_id = g.enrollment_id
+        JOIN "course" c ON e.course_id = c.course_id
+        WHERE e.student_id = $1 AND e.semester_id = $2; -- Use $2 for latestSemesterId
+      `;
+      // Pass both parameters here
+      const sgpaResult = await pool.query(sgpaQuery, [studentId, latestSemesterId]);
+      sgpa = parseFloat(sgpaResult.rows[0]?.sgpa || 0).toFixed(2);
+      console.log(`Calculated SGPA for ${studentId}: ${sgpa}`);
+
+      // === Step 3: Calculate Attendance Rate (Use the latestSemesterId found above) ===
+      const attendanceQuery = `
+        SELECT
+          COUNT(CASE WHEN a.status IN ('Present', 'Late') THEN 1 ELSE NULL END) AS attended_classes,
+          COUNT(a.attendance_id) AS total_classes
+        FROM "attendance" a
+        JOIN "enrollment" e ON a.enrollment_id = e.enrollment_id
+        WHERE e.student_id = $1 AND e.semester_id = $2; -- Use $2 for latestSemesterId
+      `;
+      // Pass both parameters here
+      const attendanceResult = await pool.query(attendanceQuery, [studentId, latestSemesterId]);
+      const attendedClasses = parseInt(attendanceResult.rows[0]?.attended_classes || 0);
+      const totalClasses = parseInt(attendanceResult.rows[0]?.total_classes || 0);
+      const attendanceRate = totalClasses === 0 ? 0 : ((attendedClasses / totalClasses) * 100);
+      formattedAttendanceRate = attendanceRate.toFixed(1);
+      console.log(`Calculated Attendance Rate for ${studentId} (latest semester): ${formattedAttendanceRate}%`);
+
+      // === Step 4: Count Enrolled Courses (Use the latestSemesterId found above) ===
+      const enrolledCoursesQuery = `
+        SELECT COUNT(enrollment_id) AS course_count
         FROM "enrollment"
-        WHERE student_id = $1
-      );
-    `;
-    const enrolledCoursesResult = await pool.query(enrolledCoursesQuery, [studentId]);
-    const enrolledCoursesCount = parseInt(enrolledCoursesResult.rows[0]?.course_count || 0);
-    console.log(`Enrolled courses count for ${studentId} (latest semester): ${enrolledCoursesCount}`);
+        WHERE student_id = $1 AND semester_id = $2; -- Use $2 for latestSemesterId
+      `;
+      // Pass both parameters here
+      const enrolledCoursesResult = await pool.query(enrolledCoursesQuery, [studentId, latestSemesterId]);
+      enrolledCoursesCount = parseInt(enrolledCoursesResult.rows[0]?.course_count || 0);
+      console.log(`Enrolled courses count for ${studentId} (latest semester): ${enrolledCoursesCount}`);
+
+    } else {
+        console.log(`No enrollments found for student ${studentId}. Returning default stats.`);
+    }
 
     // === Step 5: Send ONE combined response ===
     res.status(200).json({
@@ -142,8 +151,8 @@ app.get('/api/students/:studentId', async (req, res) => {
 });
 
 
-// --- NEW ENDPOINT FOR CURRENT SEMESTER GRADES ---
-// Ensure this block is present in your file
+
+// --- CURRENT GRADES ENDPOINT ---
 app.get('/api/grades/:studentId/current', async (req, res) => {
   const { studentId } = req.params;
   console.log(`--- Request received for CURRENT grades for student ${studentId} ---`);
@@ -174,12 +183,8 @@ app.get('/api/grades/:studentId/current', async (req, res) => {
     // === Step 2: Query for Detailed Course Grades for THAT semester ===
     const gradesQuery = `
       SELECT
-        c.course_id,
-        c.course_name,
-        c.credit_hours,
-        g.numeric_score,
-        g.letter_grade,
-        g.gpa_point
+        c.course_id, c.course_name, c.credit_hours,
+        g.numeric_score, g.letter_grade, g.gpa_point
       FROM "enrollment" e
       JOIN "course" c ON e.course_id = c.course_id
       LEFT JOIN "grade" g ON e.enrollment_id = g.enrollment_id
@@ -190,12 +195,8 @@ app.get('/api/grades/:studentId/current', async (req, res) => {
     const courseGrades = gradesResult.rows;
 
     // === Step 3: Calculate Summary Statistics ===
-    let totalCreditsAttempted = 0;
-    let totalCreditsEarned = 0;
-    let totalPointsEarned = 0;
-    let totalScoreSum = 0;
-    let gradedCoursesCount = 0;
-    let coursesPassed = 0;
+    let totalCreditsAttempted = 0, totalPointsEarned = 0, totalScoreSum = 0;
+    let gradedCoursesCount = 0, coursesPassed = 0;
 
     courseGrades.forEach(grade => {
       totalCreditsAttempted += grade.credit_hours;
@@ -203,17 +204,11 @@ app.get('/api/grades/:studentId/current', async (req, res) => {
         gradedCoursesCount++;
         totalPointsEarned += grade.credit_hours * grade.gpa_point;
         totalScoreSum += parseFloat(grade.numeric_score);
-        if (grade.gpa_point > 0) {
-          coursesPassed++;
-          totalCreditsEarned += grade.credit_hours;
-        }
+        if (grade.gpa_point > 0) coursesPassed++;
       }
     });
 
-    const creditsForGpaCalc = courseGrades
-        .filter(g => g.gpa_point !== null)
-        .reduce((sum, g) => sum + g.credit_hours, 0);
-
+    const creditsForGpaCalc = courseGrades.filter(g => g.gpa_point !== null).reduce((sum, g) => sum + g.credit_hours, 0);
     const currentSgpa = creditsForGpaCalc === 0 ? 0 : (totalPointsEarned / creditsForGpaCalc);
     const averageScore = gradedCoursesCount === 0 ? 0 : (totalScoreSum / gradedCoursesCount);
 
@@ -222,10 +217,8 @@ app.get('/api/grades/:studentId/current', async (req, res) => {
     // === Step 4: Send the Combined Data ===
     res.status(200).json({
       summary: {
-        currentSgpa: currentSgpa.toFixed(2),
-        totalCredits: totalCreditsAttempted,
-        coursesPassed: coursesPassed,
-        totalCourses: courseGrades.length,
+        currentSgpa: currentSgpa.toFixed(2), totalCredits: totalCreditsAttempted,
+        coursesPassed: coursesPassed, totalCourses: courseGrades.length,
         averageScore: averageScore.toFixed(1)
       },
       details: courseGrades
@@ -234,6 +227,75 @@ app.get('/api/grades/:studentId/current', async (req, res) => {
   } catch (error) {
     console.error(`Database error fetching current grades for student ${studentId}:`, error);
     res.status(500).json({ message: 'An internal server error occurred while fetching grades.' });
+  }
+});
+
+// --- CURRENT ATTENDANCE ENDPOINT ---
+app.get('/api/attendance/:studentId/current', async (req, res) => {
+  const { studentId } = req.params;
+  console.log(`--- Request received for CURRENT attendance for student ${studentId} ---`);
+
+  if (!studentId) { /* ... handle error ... */ }
+
+  try {
+    // === Step 1: Find latest semester ID ===
+    const latestSemesterQuery = `SELECT MAX(semester_id) as latest_sem_id FROM "enrollment" WHERE student_id = $1;`;
+    const semesterResult = await pool.query(latestSemesterQuery, [studentId]);
+    const latestSemesterId = semesterResult.rows[0]?.latest_sem_id;
+
+    if (!latestSemesterId) { /* ... handle no enrollments ... */ }
+
+    // === Step 2: Query for all attendance records for that semester ===
+    const attendanceQuery = `
+      SELECT e.course_id, c.course_name, a.status, a.class_date
+      FROM "attendance" a
+      JOIN "enrollment" e ON a.enrollment_id = e.enrollment_id
+      JOIN "course" c ON e.course_id = c.course_id
+      WHERE e.student_id = $1 AND e.semester_id = $2;
+    `;
+    const attendanceResult = await pool.query(attendanceQuery, [studentId, latestSemesterId]);
+    const allRecords = attendanceResult.rows;
+
+    // === Step 3: Calculate Overall Summary ===
+    let totalClassesOverall = allRecords.length, attendedClassesOverall = 0, absentClassesOverall = 0;
+    allRecords.forEach(record => {
+      if (record.status === 'Present' || record.status === 'Late') attendedClassesOverall++;
+      if (record.status === 'Absent') absentClassesOverall++;
+    });
+    const overallRate = totalClassesOverall === 0 ? 0 : (attendedClassesOverall / totalClassesOverall) * 100;
+    const summary = {
+      overallRate: overallRate.toFixed(1), totalClasses: totalClassesOverall,
+      classesAttended: attendedClassesOverall, totalAbsences: absentClassesOverall
+    };
+
+    // === Step 4: Calculate Per-Course Details ===
+    const detailsMap = new Map();
+    allRecords.forEach(record => {
+      if (!detailsMap.has(record.course_id)) {
+        detailsMap.set(record.course_id, {
+          course_id: record.course_id, course_name: record.course_name,
+          total: 0, present: 0, absent: 0, late: 0, attended: 0
+        });
+      }
+      const courseStat = detailsMap.get(record.course_id);
+      courseStat.total++;
+      if (record.status === 'Present') courseStat.present++;
+      if (record.status === 'Absent') courseStat.absent++;
+      if (record.status === 'Late') courseStat.late++;
+      if (record.status === 'Present' || record.status === 'Late') courseStat.attended++;
+    });
+    const details = Array.from(detailsMap.values()).map(stat => ({
+      ...stat, percentage: stat.total === 0 ? 0 : (stat.attended / stat.total) * 100
+    }));
+
+    console.log(`Calculated attendance summary and ${details.length} course details for student ${studentId}, semester ${latestSemesterId}`);
+
+    // === Step 5: Send Combined Data ===
+    res.status(200).json({ summary, details, recent: allRecords });
+
+  } catch (error) {
+    console.error(`Database error fetching current attendance for student ${studentId}:`, error);
+    res.status(500).json({ message: 'An internal server error occurred while fetching attendance.' });
   }
 });
 
