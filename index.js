@@ -408,7 +408,7 @@ app.get('/api/admin/dashboard-stats', async (req, res) => {
     const activeCourses = parseInt(courseCountResult.rows[0]?.active_courses || 0);
 
     // --- Query 3: Faculty Members ---
-    const facultyCountQuery = 'SELECT COUNT(faculty_id) AS faculty_members FROM "faculty";'; // Assuming lowercase table name
+    const facultyCountQuery = 'SELECT COUNT(DISTINCT faculty_name) AS faculty_members FROM "course" WHERE status = \'Active\' AND faculty_name IS NOT NULL;'; // Assuming lowercase table name
     const facultyCountResult = await pool.query(facultyCountQuery);
     const facultyMembers = parseInt(facultyCountResult.rows[0]?.faculty_members || 0);
 
@@ -440,6 +440,315 @@ app.get('/api/admin/dashboard-stats', async (req, res) => {
   }
 });
 
+app.delete('/api/students/:studentId', async (req, res) => {
+  const { studentId } = req.params;
+  console.log(`--- Request received to DELETE student: ${studentId} ---`);
+
+  if (!studentId) {
+    return res.status(400).json({ message: 'Student ID is required.' });
+  }
+
+  try {
+    // Note: Deleting a student might fail if they have related records
+    // (e.g., enrollments) due to foreign key constraints.
+    // Handling this might require deleting related records first or setting status to 'Inactive'.
+    const query = 'DELETE FROM "student" WHERE student_id = $1 RETURNING student_id;';
+    const result = await pool.query(query, [studentId]);
+
+    // Check if any row was actually deleted
+    if (result.rowCount === 0) {
+      return res.status(404).json({ message: `Student with ID ${studentId} not found.` });
+    }
+
+    // Send success response
+    res.status(200).json({ message: `Student ${studentId} deleted successfully.` });
+
+  } catch (error) {
+    console.error(`Database error deleting student ${studentId}:`, error);
+     // Handle foreign key constraint violations (PostgreSQL error code '23503')
+     if (error.code === '23503') {
+        return res.status(409).json({ message: `Cannot delete student ${studentId} because they have existing enrollment or related records.` });
+    }
+    // Send generic server error for other issues
+    res.status(500).json({ message: 'An internal server error occurred while deleting the student.' });
+  }
+});
+
+app.get('/api/admin/courses-overview', async (req, res) => {
+  console.log('--- Request received for Admin Course Overview ---');
+  try {
+    // --- We'll run all our queries in parallel for speed ---
+    const [
+      totalCoursesRes,
+      activeCoursesRes,
+      totalEnrollmentRes,
+      coursesListRes
+    ] = await Promise.all([
+      // Query 1: Total Courses (All statuses)
+      pool.query('SELECT COUNT(course_id) AS total_courses FROM "course";'),
+      
+      // Query 2: Active Courses
+      pool.query('SELECT COUNT(course_id) AS active_courses FROM "course" WHERE status = \'Active\';'),
+      
+      // Query 3: Total Enrollments (All students, all courses)
+      pool.query('SELECT COUNT(enrollment_id) AS total_enrollments FROM "enrollment";'),
+      
+      // Query 4: Get Full Course List with Individual Enrollment Counts
+      // We use a LEFT JOIN to include courses with 0 enrollments
+      // and GROUP BY to get the count for each course.
+      pool.query(`
+        SELECT
+            c.course_id, c.course_name, c.credit_hours, c.faculty_name,
+            c.department, c.schedule, c.status,
+            COUNT(e.enrollment_id) AS "enrollmentCount"
+        FROM "course" c
+        LEFT JOIN "enrollment" e ON c.course_id = e.course_id
+        GROUP BY c.course_id
+        ORDER BY c.course_id;
+      `)
+    ]);
+
+    // --- Process Stats ---
+    const totalCourses = parseInt(totalCoursesRes.rows[0]?.total_courses || 0);
+    const activeCourses = parseInt(activeCoursesRes.rows[0]?.active_courses || 0);
+    const totalEnrollment = parseInt(totalEnrollmentRes.rows[0]?.total_enrollments || 0);
+    const avgClassSize = totalCourses > 0 ? Math.round(totalEnrollment / totalCourses) : 0;
+
+    // --- Process Course List ---
+    // Convert the string count from SQL to a number
+    const formattedCourses = coursesListRes.rows.map(course => ({
+      ...course,
+      enrollmentCount: parseInt(course.enrollmentCount, 10)
+    }));
+
+    // --- Send the combined response ---
+    res.status(200).json({
+      stats: {
+        totalCourses: totalCourses,
+        activeCourses: activeCourses,
+        totalEnrollment: totalEnrollment,
+        avgClassSize: avgClassSize,
+      },
+      courses: formattedCourses,
+    });
+
+  } catch (error) {
+    console.error('Database error fetching course overview:', error);
+    res.status(500).json({ message: 'An internal server error occurred while fetching course overview.' });
+  }
+});
+
+// --- CREATE NEW COURSE ENDPOINT ---
+app.post('/api/courses', async (req, res) => {
+  // 1. Extract data from request body
+  const { 
+    course_id, course_name, credit_hours, faculty_name, 
+    department, schedule, status 
+  } = req.body;
+  
+  console.log(`--- Request received to ADD course: ${course_id} ---`);
+
+  // 2. Validation (same as your /api/students endpoint)
+  if (!course_id || !course_name || !credit_hours || !department || !status) {
+    return res.status(400).json({ message: 'Missing required course fields (ID, Name, Credits, Dept, Status).' });
+  }
+
+  try {
+    // 3. Create the SQL Query
+    const query = `
+      INSERT INTO "course"
+        (course_id, course_name, credit_hours, faculty_name, department, schedule, status)
+      VALUES
+        ($1, $2, $3, $4, $5, $6, $7)
+      RETURNING *; -- Return the full created course
+    `;
+    
+    // 4. Create the values array (ensure credit_hours is a number)
+    const values = [
+      course_id,
+      course_name,
+      Number(credit_hours), // Frontend sends a string for type="number"
+      faculty_name,
+      department,
+      schedule,
+      status
+    ];
+
+    // 5. Execute the query
+    const result = await pool.query(query, values);
+
+    // 6. Send 201 Created status on success
+    res.status(201).json(result.rows[0]); // Send back the newly created course
+
+  } catch (error) {
+    console.error('Database error adding course:', error);
+    // Handle duplicate key error (same as your /api/students endpoint)
+    if (error.code === '23505') { // Unique constraint violation
+      return res.status(4.9).json({ message: `A course with ID ${course_id} already exists.` });
+    }
+    // General server error
+    res.status(500).json({ message: 'An internal server error occurred while adding the course.' });
+  }
+});
+
+app.delete('/api/courses/:courseId', async (req, res) => {
+  // 1. Get the course_id from the URL parameters
+  const { courseId } = req.params;
+  console.log(`--- Request received to DELETE course: ${courseId} ---`);
+
+  if (!courseId) {
+    return res.status(400).json({ message: 'Course ID is required.' });
+  }
+
+  try {
+    // 2. Execute the DELETE query
+    const query = 'DELETE FROM "course" WHERE course_id = $1 RETURNING course_id;';
+    const result = await pool.query(query, [courseId]);
+
+    // 3. Check if any row was actually deleted
+    if (result.rowCount === 0) {
+      return res.status(404).json({ message: `Course with ID ${courseId} not found.` });
+    }
+
+    // 4. Send success response
+    res.status(200).json({ message: `Course ${courseId} deleted successfully.` });
+
+  } catch (error) {
+    console.error(`Database error deleting course ${courseId}:`, error);
+    
+    // 5. Handle foreign key constraint violations (PostgreSQL error code '23503')
+    // This happens if you try to delete a course that has enrollments
+    if (error.code === '23503') {
+      return res.status(409).json({ message: `Cannot delete course ${courseId}. It has existing enrollments.` });
+    }
+    
+    // Send generic server error for other issues
+    res.status(500).json({ message: 'An internal server error occurred while deleting the course.' });
+  }
+});
+
+// --- UPDATE AN EXISTING COURSE ENDPOINT ---
+app.put('/api/courses/:courseId', async (req, res) => {
+  // 1. Get the course_id from the URL parameters
+  const { courseId } = req.params;
+  
+  // 2. Get the new course data from the request body
+  const { 
+    course_name, credit_hours, faculty_name, 
+    department, schedule, status 
+  } = req.body;
+
+  console.log(`--- Request received to UPDATE course: ${courseId} ---`);
+
+  // 3. Validation
+  if (!course_name || !credit_hours || !department || !status) {
+    return res.status(400).json({ message: 'Missing required course fields (Name, Credits, Dept, Status).' });
+  }
+
+  try {
+    // 4. Create the UPDATE query
+    const query = `
+      UPDATE "course"
+      SET 
+        course_name = $1,
+        credit_hours = $2,
+        faculty_name = $3,
+        department = $4,
+        schedule = $5,
+        status = $6
+      WHERE 
+        course_id = $7
+      RETURNING *; -- Return the full updated course
+    `;
+    
+    // 5. Create the values array
+    const values = [
+      course_name,
+      Number(credit_hours),
+      faculty_name,
+      department,
+      schedule,
+      status,
+      courseId // The $7 parameter
+    ];
+
+    // 6. Execute the query
+    const result = await pool.query(query, values);
+
+    // 7. Check if any row was actually updated
+    if (result.rowCount === 0) {
+      return res.status(404).json({ message: `Course with ID ${courseId} not found.` });
+    }
+
+    // 8. Send success response
+    res.status(200).json(result.rows[0]); // Send back the updated course data
+
+  } catch (error) {
+    console.error(`Database error updating course ${courseId}:`, error);
+    res.status(500).json({ message: 'An internal server error occurred while updating the course.' });
+  }
+});
+
+app.get('/api/enrollment-data', async (req, res) => {
+  console.log('--- Request received for enrollment data (courses and semesters) ---');
+  try {
+    const [coursesRes, semestersRes] = await Promise.all([
+      // Get a simple list of all courses
+      pool.query('SELECT course_id, course_name FROM "course" ORDER BY course_id;'),
+      // Get a simple list of all semesters
+      pool.query('SELECT semester_id, semester_name FROM "semester" ORDER BY semester_id;')
+    ]);
+
+    res.status(200).json({
+      courses: coursesRes.rows,
+      semesters: semestersRes.rows,
+    });
+
+  } catch (error) {
+    console.error('Database error fetching enrollment data:', error);
+    res.status(500).json({ message: 'An internal server error occurred.' });
+  }
+});
+
+// --- CREATE A NEW ENROLLMENT ---
+app.post('/api/enrollments', async (req, res) => {
+  // 1. Extract the three required IDs from the body
+  const { student_id, course_id, semester_id } = req.body;
+  console.log(`--- Request received to ENROLL student ${student_id} in course ${course_id} for sem ${semester_id} ---`);
+
+  // 2. Validation
+  if (!student_id || !course_id || !semester_id) {
+    return res.status(400).json({ message: 'Student ID, Course ID, and Semester ID are all required.' });
+  }
+
+  try {
+    // 3. Create the INSERT query
+    // We can use COALESCE to automatically set the enrollment_id
+    const query = `
+      INSERT INTO "enrollment" (enrollment_id, student_id, course_id, semester_id)
+      VALUES (
+        COALESCE((SELECT MAX(enrollment_id) + 1 FROM "enrollment"), 1001), 
+        $1, $2, $3
+      )
+      RETURNING *; -- Return the new enrollment
+    `;
+    const values = [student_id, course_id, semester_id];
+
+    // 4. Execute
+    const result = await pool.query(query, values);
+
+    // 5. Success
+    res.status(201).json(result.rows[0]);
+
+  } catch (error) {
+    console.error('Database error creating enrollment:', error);
+    // 23505 = unique_violation (student already enrolled in that course)
+    if (error.code === '23505') { 
+      return res.status(409).json({ message: 'This student is already enrolled in this course.' });
+    }
+    res.status(500).json({ message: 'An internal server error occurred.' });
+  }
+});
 
 // 6. Start the server
 app.listen(PORT, () => {
