@@ -60,11 +60,49 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
+app.get('/api/students', async (req, res) => {
+  console.log('--- Request received to GET all students ---');
+  try {
+    // Select relevant columns, excluding password hash
+    const query = `
+      SELECT 
+        student_id, first_name, last_name, email, admission_date, 
+        department, current_year, status 
+      FROM "student" 
+      ORDER BY student_id; 
+    `;
+    const result = await pool.query(query);
+    res.status(200).json(result.rows);
+  } catch (error) {
+    console.error('Database error fetching all students:', error);
+    res.status(500).json({ message: 'An internal server error occurred while fetching students.' });
+  }
+});
+
+app.get('/api/stats/average-gpa', async (req, res) => {
+  console.log(`--- Request received for Overall Average GPA ---`);
+  try {
+    const query = `
+      SELECT COALESCE(AVG(gpa_point), 0) AS average_gpa 
+      FROM "grade";
+    `;
+    const result = await pool.query(query);
+    const averageGpa = parseFloat(result.rows[0]?.average_gpa || 0).toFixed(2); // Format to 2 decimal places
+
+    console.log(`Calculated Overall Average GPA: ${averageGpa}`);
+    res.status(200).json({ averageSgpa: averageGpa }); // Send back using the key 'averageSgpa'
+
+  } catch (error) {
+    console.error('Database error calculating average GPA:', error);
+    res.status(500).json({ message: 'An internal server error occurred while calculating average GPA.' });
+  }
+});
+
 // --- STUDENT DASHBOARD DATA ENDPOINT ---
-// --- CORRECTED STUDENT DATA ENDPOINT ---
 app.get('/api/students/:studentId', async (req, res) => {
   const { studentId } = req.params;
   console.log(`--- Request received for student ID: ${studentId} ---`);
+  
 
   try {
     // === Step 1: Get Student Profile Data ===
@@ -72,8 +110,8 @@ app.get('/api/students/:studentId', async (req, res) => {
     const studentResult = await pool.query(studentQuery, [studentId]);
 
     if (studentResult.rows.length === 0) {
-      console.log(`Student not found for ID: ${studentId}`);
-      return res.status(404).json({ message: 'Student not found.' });
+        console.log(`Student not found for ID: ${studentId}`);
+        return res.status(404).json({ message: 'Student not found.' });
     }
     const studentData = studentResult.rows[0];
 
@@ -89,48 +127,48 @@ app.get('/api/students/:studentId', async (req, res) => {
 
     // Only proceed with calculations if the student has enrollments
     if (latestSemesterId) {
-      console.log(`Latest semester ID for ${studentId} is ${latestSemesterId}`);
+        console.log(`Latest semester ID for ${studentId} is ${latestSemesterId}`);
 
-      // === Step 2: Calculate SGPA (Use the latestSemesterId found above) ===
-      const sgpaQuery = `
-        SELECT COALESCE(SUM(c.credit_hours * g.gpa_point) / NULLIF(SUM(c.credit_hours), 0), 0) AS sgpa
-        FROM "enrollment" e
-        JOIN "grade" g ON e.enrollment_id = g.enrollment_id
-        JOIN "course" c ON e.course_id = c.course_id
-        WHERE e.student_id = $1 AND e.semester_id = $2; -- Use $2 for latestSemesterId
-      `;
-      // Pass both parameters here
-      const sgpaResult = await pool.query(sgpaQuery, [studentId, latestSemesterId]);
-      sgpa = parseFloat(sgpaResult.rows[0]?.sgpa || 0).toFixed(2);
-      console.log(`Calculated SGPA for ${studentId}: ${sgpa}`);
+        // === Step 2: Calculate SGPA (Use the latestSemesterId found above) ===
+        const sgpaQuery = `
+          SELECT COALESCE(SUM(c.credit_hours * g.gpa_point) / NULLIF(SUM(c.credit_hours), 0), 0) AS sgpa
+          FROM "enrollment" e
+          JOIN "grade" g ON e.enrollment_id = g.enrollment_id
+          JOIN "course" c ON e.course_id = c.course_id
+          WHERE e.student_id = $1 AND e.semester_id = $2; -- Use $2 for latestSemesterId
+        `;
+        // Pass both parameters here
+        const sgpaResult = await pool.query(sgpaQuery, [studentId, latestSemesterId]);
+        sgpa = parseFloat(sgpaResult.rows[0]?.sgpa || 0).toFixed(2);
+        console.log(`Calculated SGPA for ${studentId}: ${sgpa}`);
 
-      // === Step 3: Calculate Attendance Rate (Use the latestSemesterId found above) ===
-      const attendanceQuery = `
-        SELECT
-          COUNT(CASE WHEN a.status IN ('Present', 'Late') THEN 1 ELSE NULL END) AS attended_classes,
-          COUNT(a.attendance_id) AS total_classes
-        FROM "attendance" a
-        JOIN "enrollment" e ON a.enrollment_id = e.enrollment_id
-        WHERE e.student_id = $1 AND e.semester_id = $2; -- Use $2 for latestSemesterId
-      `;
-      // Pass both parameters here
-      const attendanceResult = await pool.query(attendanceQuery, [studentId, latestSemesterId]);
-      const attendedClasses = parseInt(attendanceResult.rows[0]?.attended_classes || 0);
-      const totalClasses = parseInt(attendanceResult.rows[0]?.total_classes || 0);
-      const attendanceRate = totalClasses === 0 ? 0 : ((attendedClasses / totalClasses) * 100);
-      formattedAttendanceRate = attendanceRate.toFixed(1);
-      console.log(`Calculated Attendance Rate for ${studentId} (latest semester): ${formattedAttendanceRate}%`);
+        // === Step 3: Calculate Attendance Rate (Use the latestSemesterId found above) ===
+        const attendanceQuery = `
+          SELECT
+            COUNT(CASE WHEN a.status IN ('Present', 'Late') THEN 1 ELSE NULL END) AS attended_classes,
+            COUNT(a.attendance_id) AS total_classes
+          FROM "attendance" a
+          JOIN "enrollment" e ON a.enrollment_id = e.enrollment_id
+          WHERE e.student_id = $1 AND e.semester_id = $2; -- Use $2 for latestSemesterId
+        `;
+        // Pass both parameters here
+        const attendanceResult = await pool.query(attendanceQuery, [studentId, latestSemesterId]);
+        const attendedClasses = parseInt(attendanceResult.rows[0]?.attended_classes || 0);
+        const totalClasses = parseInt(attendanceResult.rows[0]?.total_classes || 0);
+        const attendanceRate = totalClasses === 0 ? 0 : ((attendedClasses / totalClasses) * 100);
+        formattedAttendanceRate = attendanceRate.toFixed(1);
+        console.log(`Calculated Attendance Rate for ${studentId} (latest semester): ${formattedAttendanceRate}%`);
 
-      // === Step 4: Count Enrolled Courses (Use the latestSemesterId found above) ===
-      const enrolledCoursesQuery = `
-        SELECT COUNT(enrollment_id) AS course_count
-        FROM "enrollment"
-        WHERE student_id = $1 AND semester_id = $2; -- Use $2 for latestSemesterId
-      `;
-      // Pass both parameters here
-      const enrolledCoursesResult = await pool.query(enrolledCoursesQuery, [studentId, latestSemesterId]);
-      enrolledCoursesCount = parseInt(enrolledCoursesResult.rows[0]?.course_count || 0);
-      console.log(`Enrolled courses count for ${studentId} (latest semester): ${enrolledCoursesCount}`);
+        // === Step 4: Count Enrolled Courses (Use the latestSemesterId found above) ===
+        const enrolledCoursesQuery = `
+          SELECT COUNT(enrollment_id) AS course_count
+          FROM "enrollment"
+          WHERE student_id = $1 AND semester_id = $2; -- Use $2 for latestSemesterId
+        `;
+        // Pass both parameters here
+        const enrolledCoursesResult = await pool.query(enrolledCoursesQuery, [studentId, latestSemesterId]);
+        enrolledCoursesCount = parseInt(enrolledCoursesResult.rows[0]?.course_count || 0);
+        console.log(`Enrolled courses count for ${studentId} (latest semester): ${enrolledCoursesCount}`);
 
     } else {
         console.log(`No enrollments found for student ${studentId}. Returning default stats.`);
@@ -149,8 +187,6 @@ app.get('/api/students/:studentId', async (req, res) => {
     res.status(500).json({ message: 'An internal server error occurred while fetching dashboard data.' });
   }
 });
-
-
 
 // --- CURRENT GRADES ENDPOINT ---
 app.get('/api/grades/:studentId/current', async (req, res) => {
@@ -230,12 +266,60 @@ app.get('/api/grades/:studentId/current', async (req, res) => {
   }
 });
 
+app.post('/api/students', async (req, res) => {
+  // Extract data from request body (ensure frontend sends all required fields)
+  const { student_id, first_name, last_name, email, password, admission_date, department, current_year, status } = req.body;
+  console.log(`--- Request received to ADD student: ${student_id} ---`);
+
+  // Basic validation (add more as needed)
+  if (!student_id || !first_name || !last_name || !email || !password || !department || !current_year) {
+    // Return 400 Bad Request if required fields are missing
+    return res.status(400).json({ message: 'Missing required student fields (ID, Name, Email, Password, Dept, Year).' });
+  }
+
+  try {
+    // Hash the password before storing
+    const saltRounds = 10;
+    const password_hash = await bcrypt.hash(password, saltRounds);
+
+    const query = `
+      INSERT INTO "student"
+        (student_id, first_name, last_name, email, password_hash, admission_date, department, current_year, status)
+      VALUES
+        ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      RETURNING student_id, first_name, last_name, email, admission_date, department, current_year, status; -- Return the created student (without hash)
+    `;
+    const values = [
+      student_id, first_name, last_name, email, password_hash,
+      admission_date || new Date(), // Default admission date if not provided
+      department, parseInt(current_year, 10), // Ensure year is integer
+      status || 'Active' // Default status if not provided
+    ];
+
+    const result = await pool.query(query, values);
+    // Send 201 Created status on success
+    res.status(201).json(result.rows[0]); // Send back the newly created student data
+
+  } catch (error) {
+    console.error('Database error adding student:', error);
+    // Handle potential duplicate key errors (e.g., email or student_id already exists)
+    if (error.code === '23505') { // Unique constraint violation code for PostgreSQL
+        // Return 409 Conflict status
+        return res.status(409).json({ message: `Student with ID ${student_id} or email ${email} already exists.` });
+    }
+    // Return 500 Internal Server Error for other database issues
+    res.status(500).json({ message: 'An internal server error occurred while adding the student.' });
+  }
+});
+
 // --- CURRENT ATTENDANCE ENDPOINT ---
 app.get('/api/attendance/:studentId/current', async (req, res) => {
   const { studentId } = req.params;
   console.log(`--- Request received for CURRENT attendance for student ${studentId} ---`);
 
-  if (!studentId) { /* ... handle error ... */ }
+  if (!studentId) {
+     return res.status(400).json({ message: 'Student ID is required.' }); // Added proper error handling
+  }
 
   try {
     // === Step 1: Find latest semester ID ===
@@ -243,7 +327,16 @@ app.get('/api/attendance/:studentId/current', async (req, res) => {
     const semesterResult = await pool.query(latestSemesterQuery, [studentId]);
     const latestSemesterId = semesterResult.rows[0]?.latest_sem_id;
 
-    if (!latestSemesterId) { /* ... handle no enrollments ... */ }
+    if (!latestSemesterId) {
+      console.log(`No enrollments found for student ${studentId}, returning empty attendance.`);
+      // Return default empty state
+      return res.status(200).json({
+        summary: { overallRate: '0.0', totalClasses: 0, classesAttended: 0, totalAbsences: 0 },
+        details: [],
+        recent: [] // Also return empty recent
+      });
+    }
+     console.log(`Latest semester ID for ${studentId} is ${latestSemesterId}`); // Added log
 
     // === Step 2: Query for all attendance records for that semester ===
     const attendanceQuery = `
@@ -291,11 +384,59 @@ app.get('/api/attendance/:studentId/current', async (req, res) => {
     console.log(`Calculated attendance summary and ${details.length} course details for student ${studentId}, semester ${latestSemesterId}`);
 
     // === Step 5: Send Combined Data ===
-    res.status(200).json({ summary, details, recent: allRecords });
+    res.status(200).json({ summary, details, recent: allRecords }); // Includes recent records
 
   } catch (error) {
     console.error(`Database error fetching current attendance for student ${studentId}:`, error);
     res.status(500).json({ message: 'An internal server error occurred while fetching attendance.' });
+  }
+});
+
+// --- ADMIN DASHBOARD STATS ENDPOINT ---
+app.get('/api/admin/dashboard-stats', async (req, res) => {
+  console.log(`--- Request received for Admin Dashboard Stats ---`);
+
+  try {
+    // --- Query 1: Total Students ---
+    const studentCountQuery = 'SELECT COUNT(student_id) AS total_students FROM "student" WHERE status = \'Active\';';
+    const studentCountResult = await pool.query(studentCountQuery);
+    const totalStudents = parseInt(studentCountResult.rows[0]?.total_students || 0);
+
+    // --- Query 2: Active Courses ---
+    const courseCountQuery = 'SELECT COUNT(course_id) AS active_courses FROM "course" WHERE status = \'Active\';';
+    const courseCountResult = await pool.query(courseCountQuery);
+    const activeCourses = parseInt(courseCountResult.rows[0]?.active_courses || 0);
+
+    // --- Query 3: Faculty Members ---
+    const facultyCountQuery = 'SELECT COUNT(faculty_id) AS faculty_members FROM "faculty";'; // Assuming lowercase table name
+    const facultyCountResult = await pool.query(facultyCountQuery);
+    const facultyMembers = parseInt(facultyCountResult.rows[0]?.faculty_members || 0);
+
+    // --- Query 4: Average Attendance ---
+    const avgAttendanceQuery = `
+      SELECT
+        CASE
+          WHEN COUNT(a.attendance_id) = 0 THEN 0
+          ELSE (COUNT(CASE WHEN a.status IN ('Present', 'Late') THEN 1 ELSE NULL END) * 100.0 / COUNT(a.attendance_id))
+        END AS average_attendance
+      FROM "attendance" a;
+    `;
+    const avgAttendanceResult = await pool.query(avgAttendanceQuery);
+    const averageAttendance = parseFloat(avgAttendanceResult.rows[0]?.average_attendance || 0).toFixed(1);
+
+    console.log(`Admin Stats: Students=${totalStudents}, Courses=${activeCourses}, Faculty=${facultyMembers}, AvgAttend=${averageAttendance}%`);
+
+    // === Send the Combined Stats ===
+    res.status(200).json({
+      totalStudents,
+      activeCourses,
+      facultyMembers,
+      averageAttendance
+    });
+
+  } catch (error) {
+    console.error(`Database error fetching admin dashboard stats:`, error);
+    res.status(500).json({ message: 'An internal server error occurred while fetching admin stats.' });
   }
 });
 
