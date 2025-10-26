@@ -61,12 +61,11 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
-// --- CORRECTED STUDENT DATA ENDPOINT ---
+// --- STUDENT DATA + DASHBOARD STATS ENDPOINT ---
 app.get('/api/students/:studentId', async (req, res) => {
   const { studentId } = req.params;
   console.log(`--- Request received for student ID: ${studentId} ---`);
 
-  // Start of the main try block for this route
   try {
     // === Step 1: Get Student Profile Data ===
     const studentQuery = 'SELECT student_id, first_name, last_name, email, admission_date, department, current_year, status FROM "student" WHERE student_id = $1';
@@ -136,18 +135,111 @@ app.get('/api/students/:studentId', async (req, res) => {
       enrolledCoursesCount: enrolledCoursesCount
     });
 
-  // End of the main try block for this route
   } catch (error) {
-    // This is the error handler FOR THIS ROUTE
     console.error(`Database error fetching data for student ${studentId}:`, error);
     res.status(500).json({ message: 'An internal server error occurred while fetching dashboard data.' });
   }
-// End of the app.get(...) function
 });
 
-// --- THE EXTRA CATCH BLOCK WAS REMOVED FROM HERE ---
+
+// --- NEW ENDPOINT FOR CURRENT SEMESTER GRADES ---
+// Ensure this block is present in your file
+app.get('/api/grades/:studentId/current', async (req, res) => {
+  const { studentId } = req.params;
+  console.log(`--- Request received for CURRENT grades for student ${studentId} ---`);
+
+  if (!studentId) {
+    return res.status(400).json({ message: 'Student ID is required.' });
+  }
+
+  try {
+    // === Step 1: Find the student's latest semester ID ===
+    const latestSemesterQuery = `
+      SELECT MAX(semester_id) as latest_sem_id
+      FROM "enrollment"
+      WHERE student_id = $1;
+    `;
+    const semesterResult = await pool.query(latestSemesterQuery, [studentId]);
+    const latestSemesterId = semesterResult.rows[0]?.latest_sem_id;
+
+    if (!latestSemesterId) {
+      console.log(`No enrollments found for student ${studentId}`);
+      return res.status(200).json({
+        summary: { currentSgpa: '0.00', totalCredits: 0, coursesPassed: 0, totalCourses: 0, averageScore: '0.0' },
+        details: []
+      });
+    }
+    console.log(`Latest semester ID for ${studentId} is ${latestSemesterId}`);
+
+    // === Step 2: Query for Detailed Course Grades for THAT semester ===
+    const gradesQuery = `
+      SELECT
+        c.course_id,
+        c.course_name,
+        c.credit_hours,
+        g.numeric_score,
+        g.letter_grade,
+        g.gpa_point
+      FROM "enrollment" e
+      JOIN "course" c ON e.course_id = c.course_id
+      LEFT JOIN "grade" g ON e.enrollment_id = g.enrollment_id
+      WHERE e.student_id = $1 AND e.semester_id = $2
+      ORDER BY c.course_id;
+    `;
+    const gradesResult = await pool.query(gradesQuery, [studentId, latestSemesterId]);
+    const courseGrades = gradesResult.rows;
+
+    // === Step 3: Calculate Summary Statistics ===
+    let totalCreditsAttempted = 0;
+    let totalCreditsEarned = 0;
+    let totalPointsEarned = 0;
+    let totalScoreSum = 0;
+    let gradedCoursesCount = 0;
+    let coursesPassed = 0;
+
+    courseGrades.forEach(grade => {
+      totalCreditsAttempted += grade.credit_hours;
+      if (grade.gpa_point !== null && grade.numeric_score !== null) {
+        gradedCoursesCount++;
+        totalPointsEarned += grade.credit_hours * grade.gpa_point;
+        totalScoreSum += parseFloat(grade.numeric_score);
+        if (grade.gpa_point > 0) {
+          coursesPassed++;
+          totalCreditsEarned += grade.credit_hours;
+        }
+      }
+    });
+
+    const creditsForGpaCalc = courseGrades
+        .filter(g => g.gpa_point !== null)
+        .reduce((sum, g) => sum + g.credit_hours, 0);
+
+    const currentSgpa = creditsForGpaCalc === 0 ? 0 : (totalPointsEarned / creditsForGpaCalc);
+    const averageScore = gradedCoursesCount === 0 ? 0 : (totalScoreSum / gradedCoursesCount);
+
+    console.log(`Calculated summary for ${studentId}, sem ${latestSemesterId}: SGPA=${currentSgpa.toFixed(2)}, Credits=${totalCreditsAttempted}, Passed=${coursesPassed}/${courseGrades.length}, AvgScore=${averageScore.toFixed(1)}`);
+
+    // === Step 4: Send the Combined Data ===
+    res.status(200).json({
+      summary: {
+        currentSgpa: currentSgpa.toFixed(2),
+        totalCredits: totalCreditsAttempted,
+        coursesPassed: coursesPassed,
+        totalCourses: courseGrades.length,
+        averageScore: averageScore.toFixed(1)
+      },
+      details: courseGrades
+    });
+
+  } catch (error) {
+    console.error(`Database error fetching current grades for student ${studentId}:`, error);
+    res.status(500).json({ message: 'An internal server error occurred while fetching grades.' });
+  }
+});
+
 
 // 6. Start the server
 app.listen(PORT, () => {
   console.log(`✅ Backend server is running on http://localhost:${PORT}`);
 });
+
