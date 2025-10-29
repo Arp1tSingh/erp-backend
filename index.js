@@ -750,6 +750,167 @@ app.post('/api/enrollments', async (req, res) => {
   }
 });
 
+
+// --- ADMIN REPORTS DATA ENDPOINT ---
+app.get('/api/admin/reports-data', async (req, res) => {
+  console.log('--- Request received for Admin Reports Data ---');
+  try {
+    // --- Run multiple queries in parallel ---
+    const [
+      keyMetricsRes,
+      // enrollmentTrendRes, // Placeholder - requires date logic not easily done here
+      // weeklyAttendanceRes, // Placeholder - requires date logic
+      departmentDistRes,
+      performanceDistRes,
+    ] = await Promise.all([
+      // 1. Key Metrics (Re-use some logic from dashboard stats)
+      Promise.all([
+        pool.query('SELECT COUNT(enrollment_id) AS total_enrollments FROM "enrollment";'), // Total Enrollments
+        pool.query('SELECT COUNT(course_id) AS active_courses FROM "course" WHERE status = \'Active\';'), // Active Courses
+        pool.query(`
+          SELECT
+            CASE WHEN COUNT(a.attendance_id) = 0 THEN 0
+            ELSE (COUNT(CASE WHEN a.status IN ('Present', 'Late') THEN 1 ELSE NULL END) * 100.0 / COUNT(a.attendance_id))
+            END AS average_attendance
+          FROM "attendance" a;
+        `), // Average Attendance
+        pool.query('SELECT COALESCE(AVG(gpa_point), 0) AS average_gpa FROM "grade";'), // Average GPA
+      ]),
+
+      // 2. Enrollment Trend (Placeholder - Needs more complex date grouping)
+      // pool.query(`SELECT TO_CHAR(admission_date, 'Mon') as month, COUNT(student_id) as students FROM "student" WHERE admission_date >= date_trunc('year', CURRENT_DATE) GROUP BY month ORDER BY MIN(admission_date);`),
+
+      // 3. Weekly Attendance (Placeholder - Needs complex day-of-week grouping)
+      // pool.query(`SELECT TO_CHAR(class_date, 'Dy') as day, AVG(CASE WHEN status IN ('Present', 'Late') THEN 100.0 ELSE 0 END) as percentage FROM "attendance" WHERE class_date >= CURRENT_DATE - INTERVAL '1 month' GROUP BY day ORDER BY EXTRACT(DOW FROM class_date);`),
+
+      // 4. Department Distribution
+      pool.query(`
+        SELECT department, COUNT(student_id) AS value
+        FROM "student"
+        WHERE status = 'Active' -- Count only active students per department
+        GROUP BY department
+        ORDER BY department;
+      `),
+
+      // 5. Performance (GPA) Distribution
+      pool.query(`
+        WITH student_avg_gpa AS (
+          SELECT e.student_id, COALESCE(AVG(g.gpa_point), 0) as avg_gpa
+          FROM "enrollment" e
+          LEFT JOIN "grade" g ON e.enrollment_id = g.enrollment_id
+          GROUP BY e.student_id
+        )
+        SELECT
+          CASE
+            WHEN avg_gpa >= 3.5 THEN '3.5-4.0'
+            WHEN avg_gpa >= 3.0 THEN '3.0-3.5'
+            WHEN avg_gpa >= 2.5 THEN '2.5-3.0'
+            WHEN avg_gpa >= 2.0 THEN '2.0-2.5'
+            ELSE 'Below 2.0'
+          END AS range,
+          COUNT(student_id) AS students
+        FROM student_avg_gpa
+        GROUP BY
+          CASE
+            WHEN avg_gpa >= 3.5 THEN '3.5-4.0'
+            WHEN avg_gpa >= 3.0 THEN '3.0-3.5'
+            WHEN avg_gpa >= 2.5 THEN '2.5-3.0'
+            WHEN avg_gpa >= 2.0 THEN '2.0-2.5'
+            ELSE 'Below 2.0'
+          END
+        ORDER BY MIN(avg_gpa) ASC; -- <<< FIX: Order by the minimum GPA within each range
+      `),
+    ]);
+
+    // --- Process Key Metrics ---
+    const [
+      totalEnrollmentRes,
+      activeCoursesRes,
+      avgAttendanceRes,
+      avgGpaRes,
+    ] = keyMetricsRes; // Destructure results
+
+    const keyMetrics = {
+      totalEnrollment: parseInt(totalEnrollmentRes.rows[0]?.total_enrollments || 0),
+      activeCourses: parseInt(activeCoursesRes.rows[0]?.active_courses || 0),
+      averageAttendance: parseFloat(avgAttendanceRes.rows[0]?.average_attendance || 0).toFixed(1),
+      averageGpa: parseFloat(avgGpaRes.rows[0]?.average_gpa || 0).toFixed(2),
+      // Mocked trend data for now
+      enrollmentTrend: { value: 8.4, direction: 'up' }, // Example
+      attendanceTrend: { value: 3, direction: 'up' }, // Example
+    };
+
+    // --- Process Department Distribution ---
+    // Assign colors based on your frontend (needs manual mapping or a better approach)
+    const deptColors = {
+        'CMPN': "#3b82f6", // Blue
+        'IT':   "#10b981", // Green
+        'EXCS': "#8b5cf6", // Purple
+        'EXTC': "#f59e0b", // Amber
+        // Add defaults if needed
+    };
+    const departmentDistribution = departmentDistRes.rows.map(row => ({
+      name: row.department,
+      value: parseInt(row.value, 10),
+      color: deptColors[row.department] || "#6b7280" // Gray fallback
+    }));
+     // Ensure all departments are present, even with 0 students
+     const allDepts = ['CMPN', 'IT', 'EXCS', 'EXTC'];
+     allDepts.forEach(deptName => {
+        if (!departmentDistribution.some(d => d.name === deptName)) {
+            departmentDistribution.push({
+                name: deptName,
+                value: 0,
+                color: deptColors[deptName] || "#6b7280"
+            });
+        }
+     });
+     // Sort alphabetically for consistent pie chart order
+     departmentDistribution.sort((a, b) => a.name.localeCompare(b.name));
+
+
+    // --- Process Performance Distribution ---
+    const performanceDistribution = performanceDistRes.rows.map(row => ({
+      range: row.range,
+      students: parseInt(row.students, 10),
+    }));
+
+    // --- Send Combined Data ---
+    res.status(200).json({
+      keyMetrics,
+      // enrollmentTrend: enrollmentTrendRes?.rows || [], // Send empty if query fails/commented out
+      enrollmentTrend: [ // MOCKED until DB schema supports it better
+        { month: "Jan", students: keyMetrics.totalEnrollment * 0.9 }, // Example calculation
+        { month: "Feb", students: keyMetrics.totalEnrollment * 0.92 },
+        { month: "Mar", students: keyMetrics.totalEnrollment * 0.94 },
+        { month: "Apr", students: keyMetrics.totalEnrollment * 0.95 },
+        { month: "May", students: keyMetrics.totalEnrollment * 0.96 },
+        { month: "Jun", students: keyMetrics.totalEnrollment * 0.97 },
+        { month: "Jul", students: keyMetrics.totalEnrollment * 0.98 },
+        { month: "Aug", students: keyMetrics.totalEnrollment * 0.99 },
+        { month: "Sep", students: keyMetrics.totalEnrollment },
+        { month: "Oct", students: keyMetrics.totalEnrollment }, // Assume current month has total
+      ].map(m => ({...m, students: Math.round(m.students)})), // Round students
+
+      // weeklyAttendance: weeklyAttendanceRes?.rows || [], // Send empty if query fails/commented out
+      weeklyAttendance: [ // MOCKED until DB schema supports it better
+        { day: "Mon", percentage: parseFloat(keyMetrics.averageAttendance) + 1 },
+        { day: "Tue", percentage: parseFloat(keyMetrics.averageAttendance) + 2 },
+        { day: "Wed", percentage: parseFloat(keyMetrics.averageAttendance) + 0 },
+        { day: "Thu", percentage: parseFloat(keyMetrics.averageAttendance) - 1 },
+        { day: "Fri", percentage: parseFloat(keyMetrics.averageAttendance) - 2 },
+      ].map(d => ({...d, percentage: Math.max(0, Math.min(100, d.percentage)).toFixed(1)})), // Clamp and format
+
+      departmentDistribution,
+      performanceDistribution,
+    });
+
+  } catch (error) {
+    console.error('Database error fetching reports data:', error);
+    res.status(500).json({ message: 'An internal server error occurred.' });
+  }
+});
+
 // 6. Start the server
 app.listen(PORT, () => {
   console.log(`✅ Backend server is running on http://localhost:${PORT}`);
