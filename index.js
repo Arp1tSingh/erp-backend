@@ -793,32 +793,36 @@ app.get('/api/admin/reports-data', async (req, res) => {
       `),
 
       // 5. Performance (GPA) Distribution
+      // 5. Performance (GPA) Distribution (10-Point Scale)
       pool.query(`
         WITH student_avg_gpa AS (
-          SELECT e.student_id, COALESCE(AVG(g.gpa_point), 0) as avg_gpa
+          -- Calculate overall CGPA for each student (average across all their grades)
+          SELECT e.student_id, COALESCE(AVG(g.gpa_point), 0) as avg_cgpa
           FROM "enrollment" e
           LEFT JOIN "grade" g ON e.enrollment_id = g.enrollment_id
           GROUP BY e.student_id
         )
         SELECT
           CASE
-            WHEN avg_gpa >= 3.5 THEN '3.5-4.0'
-            WHEN avg_gpa >= 3.0 THEN '3.0-3.5'
-            WHEN avg_gpa >= 2.5 THEN '2.5-3.0'
-            WHEN avg_gpa >= 2.0 THEN '2.0-2.5'
-            ELSE 'Below 2.0'
+            WHEN avg_cgpa >= 9.0 THEN '9.0-10.0 (O/A+)' -- <<< NEW RANGES
+            WHEN avg_cgpa >= 8.0 THEN '8.0-8.9 (A)'    -- <<< NEW RANGES
+            WHEN avg_cgpa >= 7.0 THEN '7.0-7.9 (B+)'   -- <<< NEW RANGES
+            WHEN avg_cgpa >= 6.0 THEN '6.0-6.9 (B)'    -- <<< NEW RANGES
+            WHEN avg_cgpa >= 5.0 THEN '5.0-5.9 (C)'    -- <<< NEW RANGES
+            ELSE 'Below 5.0 (Fail)'                     -- <<< NEW RANGES
           END AS range,
           COUNT(student_id) AS students
         FROM student_avg_gpa
         GROUP BY
           CASE
-            WHEN avg_gpa >= 3.5 THEN '3.5-4.0'
-            WHEN avg_gpa >= 3.0 THEN '3.0-3.5'
-            WHEN avg_gpa >= 2.5 THEN '2.5-3.0'
-            WHEN avg_gpa >= 2.0 THEN '2.0-2.5'
-            ELSE 'Below 2.0'
+            WHEN avg_cgpa >= 9.0 THEN '9.0-10.0 (O/A+)' -- <<< NEW RANGES
+            WHEN avg_cgpa >= 8.0 THEN '8.0-8.9 (A)'    -- <<< NEW RANGES
+            WHEN avg_cgpa >= 7.0 THEN '7.0-7.9 (B+)'   -- <<< NEW RANGES
+            WHEN avg_cgpa >= 6.0 THEN '6.0-6.9 (B)'    -- <<< NEW RANGES
+            WHEN avg_cgpa >= 5.0 THEN '5.0-5.9 (C)'    -- <<< NEW RANGES
+            ELSE 'Below 5.0 (Fail)'                     -- <<< NEW RANGES
           END
-        ORDER BY MIN(avg_gpa) ASC; -- <<< FIX: Order by the minimum GPA within each range
+        ORDER BY MIN(avg_cgpa) DESC; -- Order from highest range to lowest
       `),
     ]);
 
